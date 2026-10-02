@@ -127,7 +127,7 @@ Four things it deliberately does:
 - **It lands after the turn has closed.** The row waits for the session to go idle, so it can never be spliced into the turn it describes — and never wakes an extra step.
 - **It can be switched off**: `transcriptRow: false` keeps the record in the learning timeline and the card, and out of the conversation.
 
-What is inside the row — and what the review's own prompt looks like — is in [`evidence/05-collapsed-row.png`](evidence/05-collapsed-row.png).
+The strings inside the row are plain Chinese, like everything else this plugin writes to you: a note reads `记住了一条经验：…`, a skill `改进了技能「…」`, and several of them join with ` · ` on the collapsed line.
 
 ### 8. A learning-loop nudge in the system prompt
 
