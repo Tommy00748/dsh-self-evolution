@@ -37,8 +37,10 @@
 ## 安装
 
 ```bash
-dsh plugin --profile <你的 profile> add dsh-self-evolution
+dsh plugin --profile <你的 profile> add github:Tommy00748/dsh-self-evolution
 ```
+
+（这个项目**不发 npm**，直接从 GitHub 装；`dsh-self-evolution` 是它在这份说明里的名字。）
 
 再把这一行挂进 profile 补丁层（`~/.dsh/profiles/<profile>/cordis.patch.yml`）：
 

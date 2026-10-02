@@ -161,8 +161,10 @@ Set `approveReviewEdits: false` if you would rather it merged on its own.
 
 ## Install
 
+Straight from the repository — the package name is only needed when installing from npm, which this project does not publish to:
+
 ```bash
-dsh plugin --profile <your-profile> add dsh-self-evolution-loop
+dsh plugin --profile <your-profile> add github:Tommy00748/dsh-self-evolution
 ```
 
 Then add the bundle to your profile patch (`~/.dsh/profiles/<profile>/cordis.patch.yml`):
