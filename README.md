@@ -162,7 +162,7 @@ Set `approveReviewEdits: false` if you would rather it merged on its own.
 ## Install
 
 ```bash
-dsh plugin --profile <your-profile> add dsh-self-evolution
+dsh plugin --profile <your-profile> add dsh-self-evolution-loop
 ```
 
 Then add the bundle to your profile patch (`~/.dsh/profiles/<profile>/cordis.patch.yml`):

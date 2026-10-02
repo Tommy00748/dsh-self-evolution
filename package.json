@@ -1,5 +1,5 @@
 {
-  "name": "dsh-self-evolution",
+  "name": "dsh-self-evolution-loop",
   "version": "0.8.0",
   "description": "Self-evolution for DeepSeek Harness: bounded self-managed memory, an automatic per-turn review that writes plain-language notes and refines skills instead of duplicating them, a skill health check, cross-session recall, and a learning card above the composer that only appears when it has something to say.",
   "type": "module",
@@ -35,5 +35,37 @@
       "platform": "web",
       "inject": []
     }
+  },
+  "author": "Tommy00748",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Tommy00748/dsh-self-evolution.git"
+  },
+  "homepage": "https://github.com/Tommy00748/dsh-self-evolution#readme",
+  "bugs": {
+    "url": "https://github.com/Tommy00748/dsh-self-evolution/issues"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": ">=0.0.1-rc.1 <0.1.0 || >=0.1.0-rc.1 <0.2.0-0",
+    "@deepseek-ai/dsh-llm": ">=0.0.1-rc.1 <0.1.0 || >=0.1.0-rc.1 <0.2.0-0",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-tools": {
+      "optional": false
+    },
+    "@deepseek-ai/dsh-llm": {
+      "optional": false
+    },
+    "@deepseek-ai/schemastery": {
+      "optional": false
+    }
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
   }
 }
