@@ -1,0 +1,39 @@
+{
+  "name": "dsh-self-evolution",
+  "version": "0.8.0",
+  "description": "Self-evolution for DeepSeek Harness: bounded self-managed memory, an automatic per-turn review that writes plain-language notes and refines skills instead of duplicating them, a skill health check, cross-session recall, and a learning card above the composer that only appears when it has something to say.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "self-evolution",
+    "memory",
+    "skills",
+    "agent"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node test/host.test.mjs && node test/client.test.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": []
+    }
+  }
+}

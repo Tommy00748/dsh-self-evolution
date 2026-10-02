@@ -1,0 +1,15 @@
+# Bundle layer for dsh-self-evolution.
+#
+# One insert over the empty root: the bundle owns exactly one row, so the user's own
+# profile cordis.patch.yml can still address it by id `self-evolution` and override its
+# complete `config` (a patch replaces the whole config object rather than merging into it).
+- insert:
+    - id: self-evolution
+      name: 'dsh-self-evolution'
+      config:
+        # Defaults resolve to <dshHome>/self-evolution/{MEMORY,USER}.md and
+        # <projectRoot>/.dsh/skills. Override here rather than editing index.js.
+        memoryCharLimit: 2200
+        userCharLimit: 1375
+        scanOnWrite: true
+        guidance: true
