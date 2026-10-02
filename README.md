@@ -2,11 +2,11 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![DSH](https://img.shields.io/badge/DeepSeek%20Harness-plugin-4B6BFB.svg)](https://github.com/deepseek-ai/deepseek-harness)
-[![tests](https://img.shields.io/badge/tests-155%20host%20%2B%20client%20regression-2E9E5B.svg)](#tests)
+[![tests](https://img.shields.io/badge/tests-host%20%2B%20client%20regression-2E9E5B.svg)](#tests)
 
 > An agent that forgets everything it worked out is expensive to work with. This plugin is the memory.
 
-A self-evolution layer for **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH)** — bounded long-term memory, an automatic review that runs after every turn, procedural memory that refines skills instead of piling them up, a health check for skills the loader would silently drop, cross-session recall, and a small card above the composer that says *what it just learned* only when there is something to say.
+A self-evolution layer for **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH)** — bounded long-term memory, an automatic review that runs after every turn, procedural memory that refines skills instead of piling them up, a health check for skills the loader would silently drop, cross-session recall, a **durable row inside the conversation** that says what it just learned, and a card above the composer that is reserved for changes waiting on your decision.
 
 It is a port of the self-improvement loop from [Nous Research's Hermes Agent](https://github.com/NousResearch/hermes-agent) onto DSH's own primitives (`ctx.tools` + `ctx.systemPrompt`). **The DSH core is not patched.** The memory file format is byte-compatible with Hermes, so the two are interchangeable.
 
@@ -108,13 +108,36 @@ The tool registers **optionally**: if no search backend is wired up, every other
 
 The index is a **separate derived database** (it validates its own application id and never touches session persistence) and can be deleted and rebuilt safely.
 
-### 7. A learning-loop nudge in the system prompt
+### 7. The learning shows up in the conversation itself
+
+A background review that saves something also writes **one row into the transcript**, right after the answer it learned from:
+
+```
+◈  Self-evolution   Saved a note: this machine builds with pnpm build          ⌃
+```
+
+Clicking the `⌃` expands it in place: what this turn taught it, the reviewer's stated reason, how much memory is now in use, and the text of every entry it is currently holding.
+
+Hermes prints the same thing as a system row in its transcript, and its client source carries the line that such a notice *"must not be a transient toast that can be missed"*. DSH has no system row a plugin can append, so this uses the next best durable primitive: a **logged context row** — source kind, a one-line summary, and a body that expands. Same idea, DSH's own vocabulary.
+
+Four things it deliberately does:
+
+- **The body leads with a marker.** The row is logged as a user-role message, so it opens with `[self-evolution record · not a message from the user]`; without that, a model reading the session back could take the record for something you asked for.
+- **One row per turn.** Learning that a tool wrote itself (`memory`, `skill_learn`) rides out with that turn's review row instead of producing a second one.
+- **It lands after the turn has closed.** The row waits for the session to go idle, so it can never be spliced into the turn it describes — and never wakes an extra step.
+- **It can be switched off**: `transcriptRow: false` keeps the record in the learning timeline and the card, and out of the conversation.
+
+What is inside the row — and what the review's own prompt looks like — is in [`evidence/05-collapsed-row.png`](evidence/05-collapsed-row.png).
+
+### 8. A learning-loop nudge in the system prompt
 
 A short, **stable** paragraph (`guidance: true`, on by default) tells the model when to write memory after a complex task, when to distil a skill, to check capacity before writing, and that a correction from the user outranks everything else.
 
 ---
 
 ## The card above the composer
+
+Since the transcript row exists, the two surfaces have a division of labour: **the conversation holds the record of what was learned; the card holds what is waiting on you.** The card still carries the timeline, the usage bars and the remembered entries, because those are things you look up, not things that happen.
 
 **At rest it takes no space.** With nothing to report there is a single very faint `◈` in the composer's stats row:
 
@@ -209,6 +232,7 @@ Override the bundle's row by id `self-evolution` in your profile `cordis.patch.y
     reviewTimeoutMs: 90000
     learningLog: ''             # '' → <storeDir>/learnings.jsonl
     # interface
+    transcriptRow: true         # write one durable row into the conversation per turn that learned something
     uiMode: auto                # auto (default) | always | off
     notify: verbose             # verbose (default) | on | off
     approveReviewEdits: true    # deletes/rewrites need your yes (default); false = let it merge on its own
@@ -229,9 +253,9 @@ Memory is **permanently injected into the system prompt**, which is why `scanOnW
 
 ## Tests
 
-The host half runs against a fake Cordis context through the real `apply()` — the registration surface, the memory tool's write path, the provenance ledger, the approval queue, the web endpoints, and the background review (driven by a fake `llm` stream and real `session/event` dispatches). 155 checks.
+The host half runs against a fake Cordis context through the real `apply()` — the registration surface, the memory tool's write path, the provenance ledger, the approval queue, the web endpoints, the background review (driven by a fake `llm` stream and real `session/event` dispatches), and the transcript row it appends: that a review which learned something posts exactly one row, that a tool-written learning posts one too, that one turn never yields two, that a turn which learned nothing yields none, and that `transcriptRow: false` keeps the record out of the conversation while the timeline still keeps it.
 
-The client half is a browser module, so a mistake in it is invisible from the outside — the module still loads and the card still renders. `test/client.test.mjs` therefore evaluates the real `factory()` with a stub loader and then cross-checks the two halves against each other: every `dshse-*` class the components render has a stylesheet rule, every `animation:` name has its `@keyframes`, every `t('…')` key exists in both dictionaries, and `prefers-reduced-motion` cancels every animated class. This is not ceremony: a hand-written edit once dropped 18 stylesheet rules and a translation key while `node --check` stayed happy and the UI still looked fine.
+The client half is a browser module, so a mistake in it is invisible from the outside — the module still loads and the card still renders. `test/client.test.mjs` therefore evaluates the real `factory()` with a stub loader and then cross-checks the two halves against each other: every `dshse-*` class the components render has a stylesheet rule, every `animation:` name has its `@keyframes`, every `t('…')` key exists in both dictionaries, and `prefers-reduced-motion` cancels every animated class. It also renders the transcript row for real and checks that the collapsed line is the record's summary, that the body is hidden until the chevron is clicked, and that the expanded body is the injected text verbatim. This is not ceremony: a hand-written edit once dropped 18 stylesheet rules and a translation key while `node --check` stayed happy and the UI still looked fine.
 
 ```bash
 npm test        # both halves
@@ -247,6 +271,9 @@ ln -s "/Applications/DeepSeek Harness.app/Contents/Resources/app/dsh/node_module
 
 ## Known limits
 
+- **The transcript row is a context-injection row, not a system row.** DSH gives plugins no way to append a system-role message, so the row is logged as a user-role message whose source marks it as injected context (which is why the body opens with an explicit marker). The glyph and time on the left of the row belong to the host and are not this plugin's to set. If DSH ever exposes a plugin-appended system row, this layer should move to it.
+- The row is **add-only**: it becomes part of the session history and is compacted with it. Turning `transcriptRow` off affects later turns; rows already written stay.
+- The row lists at most the first 8 remembered entries and gives a count beyond that; the complete list is always in the card.
 - **Read-only history.** The card shows what was learned but cannot edit or delete a record. Hermes' `/journey` allows both; this does not yet.
 - The expanded timeline shows at most 6 records, with a count for earlier ones.
 - "Already read" is stored in browser localStorage (`dsh:self-evolution:seen`), so a different browser — or clearing storage — will re-announce the latest learning once.

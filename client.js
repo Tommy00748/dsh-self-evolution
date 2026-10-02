@@ -46,6 +46,8 @@ window.__ModuleLoader__.load({
 		const PENDING_ENDPOINT = '/self-evolution/pending';
 		/** LocalStorage key holding the newest learning time the user has already seen. */
 		const SEEN_KEY = 'dsh:self-evolution:seen';
+		/** The mark this row draws in the transcript; small, monochrome, and never a tool glyph. */
+		const ROW_MARK = '◈';
 		/** Poll period. The background review finishes seconds after a turn, so a few seconds of lag is invisible. */
 		const POLL_MS = 5000;
 
@@ -96,6 +98,16 @@ window.__ModuleLoader__.load({
 			'.dshse-glyph{display:inline-flex;align-items:center;justify-content:center;background:0 0;border:none;border-radius:var(--dsw-radius-sm);color:inherit;cursor:pointer;opacity:.4;padding:0 4px;font-size:13px;line-height:1;transition:opacity 120ms,transform 140ms}',
 			'.dshse-glyph:hover{opacity:.9;transform:scale(1.12)}',
 			'.dshse-more{color:var(--dsw-alias-label-caption);font-size:11px}',
+			'.dshse-row{box-sizing:border-box;width:100%;min-width:0;margin:0}',
+			'.dshse-rowHead{align-items:center;gap:8px;width:100%;color:inherit;font:inherit;text-align:left;cursor:pointer;background:0 0;border:0;border-radius:var(--dsw-radius-sm);padding:2px 4px;display:flex;transition:background-color .1s}',
+			'.dshse-rowHead:hover{background:var(--dsw-alias-interactive-bg-hover)}',
+			'.dshse-rowGlyph{color:var(--dsw-alias-label-tertiary);flex:none;place-items:center;display:grid;line-height:0}',
+			'.dshse-rowLabel{color:var(--dsw-alias-label-tertiary);flex:none;font-size:13px;line-height:24px}',
+			'.dshse-rowText{min-width:0;color:var(--dsw-alias-label-secondary);text-overflow:ellipsis;white-space:nowrap;flex:auto;font-size:13px;line-height:24px;overflow:hidden}',
+			'.dshse-rowChevron{color:var(--dsw-alias-label-tertiary);flex:none;place-items:center;display:grid;line-height:0;transition:transform 180ms cubic-bezier(.2,.8,.2,1)}',
+			'.dshse-rowChevron[data-open=true]{transform:rotate(180deg)}',
+			'.dshse-rowBody{max-height:240px;margin:6px 0 0 calc(14px + var(--dsh-content-font-delta,0px));border-radius:var(--dsw-radius-md);background:var(--dsw-alias-markdown-code-block);color:var(--dsw-alias-label-tertiary);white-space:pre-wrap;overflow-wrap:anywhere;font:400 11px/16px var(--ds-font-family-code);padding:10px 14px 12px 12px;overflow:auto;animation:dshse-unfold 190ms cubic-bezier(.2,.8,.2,1) backwards;transform-origin:top}',
+			'@media (prefers-reduced-motion:reduce){.dshse-rowBody{animation:none!important}.dshse-rowChevron{transition:none!important}}',
 			'@keyframes dshse-card-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}',
 			'@keyframes dshse-unfold{from{opacity:0;transform:translateY(-5px);clip-path:inset(0 0 100% 0)}to{opacity:1;transform:translateY(0);clip-path:inset(0 0 0 0)}}',
 			'@keyframes dshse-rise{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}',
@@ -163,7 +175,10 @@ window.__ModuleLoader__.load({
 			'time.days': '{count} 天前',
 			'auto.on': '自动复盘已开启',
 			'auto.off': '自动复盘已关闭',
-			'more': '还有 {count} 条更早的记录'
+			'more': '还有 {count} 条更早的记录',
+			'transcript.label': '自我进化',
+			'transcript.empty': '（这条记录没有正文）',
+			'aria.transcriptRow': '展开这条自我进化记录'
 		};
 		const en = {
 			title: 'Self-evolution',
@@ -211,7 +226,10 @@ window.__ModuleLoader__.load({
 			'time.days': '{count}d ago',
 			'auto.on': 'Auto review is on',
 			'auto.off': 'Auto review is off',
-			'more': '{count} earlier records'
+			'more': '{count} earlier records',
+			'transcript.label': 'Self-evolution',
+			'transcript.empty': '(this record has no body)',
+			'aria.transcriptRow': 'Expand this self-evolution record'
 		};
 
 		/** "3 分钟前"-style relative time. */
@@ -349,6 +367,8 @@ window.__ModuleLoader__.load({
 			React.useEffect(() => source.subscribe(() => setState(source.getSnapshot())), []);
 			return state;
 		}
+
+		const { useEffect, useState } = React;
 
 		/** Everything both surfaces derive from the payload, computed once per render. */
 		function derive(data, seen) {
@@ -546,6 +566,46 @@ window.__ModuleLoader__.load({
 			}, '◈');
 		}
 
+		/**
+		 * The durable half of this feature: the row the Host writes into the conversation when a turn
+		 * taught the agent something.
+		 *
+		 * Hermes renders its review result as a line inside the transcript, so the record is still
+		 * readable when you scroll back. DSH logs that line as an injected context row — a collapsed
+		 * one-liner plus an expandable body — so this half only supplies the row's chrome and, while
+		 * it is being drawn, quietly marks that learning as already seen (there is no reason to
+		 * announce above the composer something that is right there in the conversation).
+		 *
+		 * Only the injected body is rendered, never the extracted tab title beside it: the title is a
+		 * property of the host node and this component does not own it.
+		 */
+		function TranscriptRow({ node, t }) {
+			const [open, setOpen] = useState(false);
+			const summary = node?.data?.producer?.label ?? '';
+			const body = (node?.data?.content ?? [])
+				.filter((block) => block?.type === 'text' && typeof block.text === 'string')
+				.map((block) => block.text)
+				.join('\n');
+			useEffect(() => {
+				if (!node?.data?.time) return;
+				source.markSeen(node.data.time);
+			}, [node?.data?.time]);
+			return h('div', { className: 'dshse-row', 'data-self-evolution': 'transcript' },
+				h('div', { className: 'dshse-rowHead' },
+					h('span', { className: 'dshse-rowGlyph', 'aria-hidden': true }, ROW_MARK),
+					h('span', { className: 'dshse-rowLabel' }, t('transcript.label')),
+					h('span', { className: 'dshse-rowText', title: summary }, summary),
+					h('button', {
+						type: 'button',
+						className: 'dshse-rowChevron',
+						'aria-expanded': open,
+						'aria-label': t('aria.transcriptRow'),
+						'data-open': open,
+						onClick: () => setOpen((value) => !value)
+					}, '⌃')),
+				open ? h('div', { className: 'dshse-rowBody' }, body.length > 0 ? body : t('transcript.empty')) : null);
+		}
+
 		return {
 			inject: ['slots', 'locale'],
 			apply(ctx) {
@@ -574,6 +634,13 @@ window.__ModuleLoader__.load({
 					order: 40,
 					locale: NS
 				}, Glyph));
+				ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
+					name: 'conversation.chat.node',
+					key: 'context',
+					id: 'self-evolution-transcript',
+					order: 10,
+					locale: NS
+				}, TranscriptRow));
 			}
 		};
 	}

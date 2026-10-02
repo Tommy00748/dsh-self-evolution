@@ -190,4 +190,129 @@ for (const rule of css.matchAll(/\.dshse-([a-zA-Z]+)(?:\[[^\]]*\])?\{([^}]*)\}/g
 	);
 }
 
-console.log(`client.test.mjs: ok — ${rendered.size} classes styled, ${animated.size} animations, ${Object.keys(dictionaries_).join('/')} dictionaries`);
+// --- 5. the transcript row actually renders --------------------------------------------------
+
+/**
+ * The row inside the conversation is driven by node data the Host supplies, so render it for real:
+ * a fake React that keeps the element tree, one fake host node, and the registered component. The
+ * collapse/expand buttons take a click handler; this calls it and checks the body appears.
+ */
+const created = [];
+const fakeReact = {
+	createElement: (type, props, ...children) => {
+		const element = {
+			type,
+			props: props ?? {},
+			children: children.flat().filter((child) => child !== null && child !== undefined && child !== false)
+		};
+		created.push(element);
+		return element;
+	},
+	useState: (initial) => [typeof initial === 'function' ? initial() : initial, () => {}],
+	useEffect: () => {},
+	useCallback: (fn) => fn,
+	memo: (component) => component
+};
+const registered = new Map();
+let capturedFactory = null;
+globalThis.window.__ModuleLoader__ = { load: ({ factory: loaded }) => { capturedFactory = loaded; } };
+new Function('window', 'document', source)(globalThis.window, fakeDocument);
+const realRequire = (name) => {
+	if (name === 'react') return fakeReact;
+	throw new Error(`unexpected require(${name})`);
+};
+capturedFactory(realRequire).apply({
+	effect: (fn) => fn(),
+	locale: { register: () => () => {} },
+	slots: {
+		inject: (name, callback) => callback(),
+		// `register(definition, component)` — the component is the second argument and is what the host
+		// renders for that seat, so it is the thing this test must call.
+		register: (definition, component) => {
+			registered.set(`${definition.name}#${definition.key ?? ''}`, component ?? definition);
+			return definition;
+		}
+	}
+});
+const rowSlot = registered.get('conversation.chat.node#context');
+assert.ok(rowSlot !== undefined, 'the transcript row is no longer registered on the context node');
+const rowComponent = rowSlot;
+assert.equal(typeof rowComponent, 'function', 'the context node seat no longer holds a component');
+
+/** Render the row once and hand back the tree it produced. */
+function renderRow(node) {
+	created.length = 0;
+	const tree = rowComponent({ node, t: (key, params) => `${key}${params === undefined ? '' : JSON.stringify(params)}` });
+	return { tree, elements: [...created] };
+}
+
+const hostNode = {
+	data: {
+		time: 1700000000000,
+		producer: { role: 'inject', label: '记住了一条经验：本机构建命令是 pnpm build' },
+		content: [{ type: 'text', text: '[自我进化记录] 正文第一段\n正文第二段' }]
+	}
+};
+const collapsed = renderRow(hostNode);
+const collapsedClasses = collapsed.elements.map((element) => element.props.className).filter(Boolean);
+assert.ok(collapsedClasses.includes('dshse-row'), 'the row renders without its own class');
+assert.ok(collapsedClasses.includes('dshse-rowText'), 'the collapsed line is missing');
+assert.equal(
+	collapsedClasses.includes('dshse-rowBody'),
+	false,
+	'the row renders its body while collapsed'
+);
+const summaryText = collapsed.elements
+	.filter((element) => element.props.className === 'dshse-rowText')
+	.flatMap((element) => element.children)
+	.join('');
+assert.equal(summaryText, hostNode.data.producer.label, 'the collapsed line is not the record summary');
+
+// The chevron is the expand toggle; clicking it must reveal the injected body verbatim.
+const chevron = collapsed.elements.find((element) => element.props.className === 'dshse-rowChevron');
+assert.ok(chevron !== undefined, 'the row has no expand toggle');
+
+/** Render an expanded row by flipping the component's own state through its click handler. */
+let openState = null;
+const statefulReact = {
+	...fakeReact,
+	useState: (initial) => {
+		if (openState === null) openState = typeof initial === 'function' ? initial() : initial;
+		return [openState, (next) => { openState = typeof next === 'function' ? next(openState) : next; }];
+	}
+};
+const statefulRequire = (name) => {
+	if (name === 'react') return statefulReact;
+	throw new Error(`unexpected require(${name})`);
+};
+capturedFactory(statefulRequire).apply({
+	effect: (fn) => fn(),
+	locale: { register: () => () => {} },
+	slots: {
+		inject: (name, callback) => callback(),
+		register: (definition, component) => {
+			registered.set(`${definition.name}#${definition.key ?? ''}`, component ?? definition);
+			return definition;
+		}
+	}
+});
+const statefulRow = registered.get('conversation.chat.node#context');
+created.length = 0;
+statefulRow({ node: hostNode, t: (key) => key });
+const toggle = created.find((element) => element.props.className === 'dshse-rowChevron');
+toggle.props.onClick();
+assert.equal(openState, true, 'clicking the chevron does not open the row');
+// The stub keeps the flipped value in `openState`, so the next render is the open one.
+created.length = 0;
+statefulRow({ node: hostNode, t: (key) => key });
+globalThis.__opened = openState;
+const openedBody = created.find((element) => element.props.className === 'dshse-rowBody');
+assert.ok(openedBody !== undefined, 'the opened row still renders no body');
+const openedText = openedBody.children.join('');
+assert.equal(
+	openedText,
+	'[自我进化记录] 正文第一段\n正文第二段',
+	'the expanded row does not show the injected body verbatim'
+);
+
+console.log(`client.test.mjs: ok — ${rendered.size} classes styled, ${animated.size} animations, ${Object.keys(dictionaries_).join('/')} dictionaries, transcript row verified`);

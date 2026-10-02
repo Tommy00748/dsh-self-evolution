@@ -26,10 +26,29 @@ import os from 'node:os';
 import path from 'node:path';
 import z from '@deepseek-ai/schemastery';
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { BlockAssembler, createUserMessage } from '@deepseek-ai/dsh-llm';
+import { BlockAssembler, boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm';
 
 export const name = 'self-evolution';
-export const inject = ['tools', 'systemPrompt'];
+export const inject = ['tools', 'systemPrompt', 'agents'];
+/** The injected agent registry: `get(sessionId)` answers the live agent, or undefined. */
+let agentRegistry = null;
+
+/**
+ * The durable conversation line this plugin writes when a turn taught it something.
+ *
+ * Hermes renders its own review result as a persistent system row inside the transcript ("💾
+ * Self-improvement review: …") and its source says that line "must not be a transient toast that
+ * can be missed". DSH has no system-role row a plugin can append, but it does have the durable
+ * `notice` context row: a user-role message whose source carries a producer kind, a short summary
+ * (drawn collapsed, so it is readable without expanding), and a model-facing body. That is the same
+ * thing in DSH's own vocabulary — a line in the conversation, not a card above the composer.
+ *
+ * The body is prefixed with a bracketed marker: the row is logged as a user message, so without it
+ * a model reading the transcript back could mistake the record for something the person asked for.
+ */
+const TRANSCRIPT_KIND = 'self-evolution';
+/** How many remembered entries the transcript body lists before it only counts the rest. */
+const TRANSCRIPT_ENTRY_LIMIT = 8;
 
 /** Entry delimiter, matching Hermes' `MEMORY.md` format so the two are interchangeable. */
 const ENTRY_SEPARATOR = '\n§\n';
@@ -107,6 +126,12 @@ export const Config = z.object({
 	reviewSkillCatalog: z.number().min(0).step(1).default(40),
 	/** A merged skill body beyond this many characters is refused, and the previous version is kept. */
 	skillMaxChars: z.number().min(1000).step(1).default(12000),
+	/**
+	 * Write one durable row into the conversation transcript after each review that learned something,
+	 * the way Hermes prints its review line: the record stays readable when scrolling back, instead of
+	 * living only in the card above the composer. The card remains for changes waiting on a decision.
+	 */
+	transcriptRow: z.boolean().default(true),
 	/** Learning-timeline file; defaults to `<storeDir>/learnings.jsonl`. */
 	learningLog: z.string().default(''),
 	/**
@@ -813,7 +838,69 @@ function decidePending(config, id, approve) {
 	};
 }
 
-/** Read the newest learning records, newest first. */
+/** Bound one summary to the durable row's collapsed line: the rest is expandable, not lost. */
+function oneLine(text, limit = 200) {
+	const flat = String(text ?? '').replace(/\s+/g, ' ').trim();
+	return flat.length <= limit ? flat : `${flat.slice(0, limit - 1)}…`;
+}
+
+/** One learned marker, named for a person rather than by its internal kind. */
+function transcriptMarker(entry) {
+	const kind = String(entry?.kind ?? '');
+	const summary = String(entry?.summary ?? '');
+	switch (kind) {
+		case 'memory': return `记住了一条经验：${summary}`;
+		case 'user': return `更新了一条对你的了解：${summary}`;
+		case 'memory-pending': return `有一条旧记忆想改，等你确认：${summary}`;
+		case 'skill-created': return `新建了技能「${summary}」`;
+		case 'skill-updated': return `改进了技能「${summary}」`;
+		case 'skill-skipped': return `暂缓改写技能「${summary}」`;
+		default: return summary;
+	}
+}
+
+/**
+ * Build the durable row for one finished review: the one-line account the collapsed row draws, and
+ * the model-facing body that explains what the record is and what is now remembered.
+ *
+ * The body is written for a reader with no programming background, in plain Chinese, and always
+ * leads with the bracketed marker — the row is logged as a user message, and without the marker a
+ * model reading the session back could take it for something the person said.
+ * @param config - this deployment's configuration.
+ * @param record - the learning-timeline record just appended (`{t, reason, learned}`).
+ * @returns the collapsed summary and the message body.
+ */
+function buildTranscriptRow(config, record) {
+	const learned = Array.isArray(record?.learned) ? record.learned : [];
+	const markers = learned.map(transcriptMarker).filter((line) => line.length > 0);
+	const summary = oneLine(markers.join(' · '));
+
+	const memory = readEntries(memoryFile(config, 'memory'));
+	const user = readEntries(memoryFile(config, 'user'));
+	const limit = TRANSCRIPT_ENTRY_LIMIT;
+	const shown = [];
+	for (const [label, entries] of [['记忆', memory], ['对你的了解', user]]) {
+		for (const entry of entries.slice(0, limit)) shown.push(`- ${label} · ${oneLine(entry, 120)}`);
+	}
+	const remembered = memory.length + user.length;
+
+	const lines = [
+		`[自我进化记录 · 不是用户发来的消息] ${summary}`,
+		'',
+		'这一轮结束后，后台有一次自动复盘，下面是它这次留下的东西：'
+	];
+	for (const marker of markers) lines.push(`- ${marker}`);
+	if (String(record?.reason ?? '').trim().length > 0) lines.push('', `它当时的判断：${oneLine(record.reason, 300)}`);
+	lines.push(
+		'',
+		`现在长期记忆里一共 ${remembered} 条（记忆 ${memory.length} 条 · 对你的了解 ${user.length} 条，占用 ${usageLabel(memory, charLimit(config, 'memory'))} / ${usageLabel(user, charLimit(config, 'user'))}）。`,
+		shown.length === 0 ? '具体记住了什么：暂时还没有条目。' : `具体记住了什么（每类最多列 ${limit} 条）：`,
+		...shown
+	);
+	return { summary: summary.length === 0 ? '学到了一件小事' : summary, body: lines.join('\n') };
+}
+
+/** What the review learned, newest first; a missing or torn log reads as "nothing yet". */
 function readLearnings(config, limit) {
 	let raw;
 	try {
@@ -895,13 +982,45 @@ function parseReviewJson(text) {
  * - A review failure of any kind is swallowed: the session must never be affected by it.
  * - At most one review runs at a time, and interrupted or failed turns are never learned from.
  * - A turn with fewer than `reviewMinSteps` tool steps is skipped: it teaches nothing.
- * @param ctx - a context that carries the `llm` service.
+ * @param ctx - a context carrying the `llm` service and the live-agent registry.
  * @param config - this deployment's configuration.
+ * @param toolMarkers - the shared per-session list of learnings the tools recorded themselves.
+ * @returns the collector the tools call, or null when this deployment writes no conversation row.
  */
-function installAutoReview(ctx, config) {
+function installAutoReview(ctx, config, toolMarkers) {
 	/** Per-session ring buffer of the current turn's compact transcript lines. */
 	const buffers = new Map();
+	/** Timestamp of the last row posted per session, so one turn never leaves two. */
+	const posted = new Map();
 	let inFlight = 0;
+
+	/** Record one learning the tools themselves caused; the review posts it with its own record. */
+	function collect(exec, entry) {
+		const sessionId = typeof exec?.agent?.id === 'string' ? exec.agent.id : '';
+		if (sessionId.length === 0 || String(entry?.summary ?? '').trim().length === 0) return;
+		const list = toolMarkers.get(sessionId) ?? [];
+		list.push(entry);
+		toolMarkers.set(sessionId, list.slice(-20));
+	}
+
+	/** Append one durable conversation row for a finished learning record. */
+	function post(session, record) {
+		try {
+			// The live-agent registry the harness mounts as the `agents` service. A session with no live
+			// agent simply gets no row.
+			const agent = agentRegistry?.get(session.id);
+			if (agent === undefined) return false;
+			const row = buildTranscriptRow(config, record);
+			agent.followup(createUserMessage({
+				content: [{ type: 'text', text: row.body }],
+				source: { kind: TRANSCRIPT_KIND, form: 'notice', summary: boundContextSummary(row.summary) }
+			}));
+			return true;
+		} catch {
+			// The conversation row is an observability aid; never let it fail the learning itself.
+			return false;
+		}
+	}
 
 	/** One auxiliary completion: a fixed system prompt, one user text, text out. */
 	async function complete(system, text, route, signal) {
@@ -1020,14 +1139,50 @@ function installAutoReview(ctx, config) {
 		}
 
 		if (learned.length === 0) return;
-		appendLearning(config, {
+		const sessionKey = String(session.id ?? '');
+		learned.push(...(toolMarkers.get(sessionKey) ?? []));
+		toolMarkers.set(sessionKey, []);
+		const record = {
 			t: Date.now(),
-			session: String(session.id ?? ''),
+			session: sessionKey,
 			reason: String(decision.reason ?? '').slice(0, 300),
 			learned
-		});
+		};
+		appendLearning(config, record);
+		if (config.transcriptRow) {
+			posted.set(sessionKey, record.t);
+			post(session, record);
+		}
 	}
 
+	/**
+	 * Write the row for learning that happened outside a review — a direct `memory` or `skill_learn`
+	 * write mid-turn. It waits for the turn to close, because a row appended while the agent is still
+	 * working would be spliced into the turn it describes and would wake another one.
+	 * @param session - the session the write happened in.
+	 * @param record - the record to post, built from the markers the tools left behind.
+	 */
+	function postAfterTurn(session, record) {
+		Promise.resolve()
+			.then(() => session.whenIdle?.())
+			.then(() => {
+				const key = String(session.id ?? '');
+				if (posted.get(key) === record.t) return;
+				if (post(session, record)) posted.set(key, record.t);
+			})
+			.catch(() => {});
+	}
+
+	/**
+	 * Append the durable row for one review into the conversation itself.
+	 *
+	 * `followup` rather than `inject`: the row opens the next turn, which is what makes it land in
+	 * the transcript scrollback instead of only in the card above the composer. A session that has
+	 * since gone away simply gets no row — a record is never worth failing a review over.
+	 * @param session - the session the review belongs to.
+	 * @param config - this deployment's configuration.
+	 * @param record - the learning-timeline record just appended.
+	 */
 	/** Run one review for a finished turn. Never throws. */
 	async function review(session, reason, buffer) {
 		if (!config.autoReview) return;
@@ -1081,6 +1236,9 @@ function installAutoReview(ctx, config) {
 			if (reply === null) return;
 			const decision = parseReviewJson(reply);
 			if (decision === null) return;
+			// The row lands only after the reviewed turn has really closed, so it can never be spliced
+			// into the turn it describes.
+			await session.whenIdle?.();
 			await applyDecision(session, decision, target, controller.signal);
 		} catch {
 			// Silent by design: the reviewer is an optimization, never a dependency.
@@ -1097,9 +1255,19 @@ function installAutoReview(ctx, config) {
 		if (event.type === 'turn/end') {
 			const finished = buffers.get(sessionId) ?? [];
 			buffers.set(sessionId, []);
+			const markers = toolMarkers.get(sessionId) ?? [];
+			toolMarkers.set(sessionId, []);
 			void review(session, event.data?.reason?.kind, finished);
+			// Learning the tools caused themselves also leaves a row — but only when the turn was not
+			// aborted mid-write, and only if the review has not just posted a row of its own (the
+			// review carries these markers along, so the fallback below stays quiet).
+			const kind = event.data?.reason?.kind;
+			if (config.transcriptRow && markers.length > 0 && kind !== 'aborted' && kind !== 'error') {
+				postAfterTurn(session, { t: Date.now(), reason: '', learned: markers });
+			}
 			return;
 		}
+		if (event.type === 'turn/start') posted.delete(sessionId);
 
 		const line = eventLine(event);
 		if (line === null) return;
@@ -1110,6 +1278,8 @@ function installAutoReview(ctx, config) {
 		while (buffer.length > config.reviewMaxEvents) buffer.shift();
 		buffers.set(sessionId, buffer);
 	});
+
+	return config.transcriptRow ? collect : null;
 }
 
 /** A capacity refusal that hands the model everything it needs to consolidate in the same turn. */
@@ -1143,6 +1313,32 @@ function locate(entries, needle) {
  * @param config - this deployment's explicit configuration.
  */
 export function apply(ctx, config) {
+	// The agent registry arrives as an injected service; a context without one (a headless or
+	// embedded host) keeps every other capability and simply writes no conversation rows.
+	agentRegistry = typeof ctx?.agents?.get === 'function' ? ctx.agents : null;
+	/**
+	 * Markers recorded by the learning tools during the current turn, keyed by session id. The
+	 * background review publishes them together with its own record, so one turn leaves one row.
+	 */
+	const toolMarkers = new Map();
+	/** The review's marker collector; null until an `llm` service made a review possible. */
+	let collectToolMarker = null;
+
+	/**
+	 * Record one learning the tools themselves caused. The row is written at the end of the turn, not
+	 * now: appending while the agent is still working would splice the row into the turn it describes
+	 * and wake another one.
+	 * @param exec - the tool execution context, carrying the calling agent.
+	 * @param entry - `{kind, summary}` of what was written.
+	 */
+	function noteTranscriptWrite(exec, entry) {
+		if (!config.transcriptRow) return;
+		const sessionId = typeof exec?.agent?.id === 'string' ? exec.agent.id : '';
+		if (sessionId.length === 0 || String(entry?.summary ?? '').trim().length === 0) return;
+		if (collectToolMarker === null) return;
+		collectToolMarker(exec, entry);
+	}
+
 	if (config.enableMemoryTool) {
 		ctx.tools.register(defineTool({
 			name: 'memory',
@@ -1190,7 +1386,7 @@ export function apply(ctx, config) {
 				kind: 'other',
 				rawInput: args.action === 'list' ? { action: args.action, target: args.target } : args
 			}),
-			execute(args) {
+			execute(args, exec) {
 				const target = args.target;
 				const label = target === 'user' ? 'USER' : 'MEMORY';
 				const limit = charLimit(config, target);
@@ -1219,6 +1415,9 @@ export function apply(ctx, config) {
 					if (outcome.ok === false && outcome.entries !== undefined) return Promise.resolve(overflow(target, outcome.entries, limit, content));
 					if (outcome.ok === false) throw new Error(outcome.message);
 					const after = readEntries(file);
+					if (outcome.message === 'saved') {
+						noteTranscriptWrite(exec, { kind: target === 'user' ? 'user' : 'memory', summary: oneLine(content, 160) });
+					}
 					return Promise.resolve({
 						ok: true,
 						target,
@@ -1319,6 +1518,10 @@ export function apply(ctx, config) {
 					root: args.root
 				});
 				const skillName = args.name.trim();
+				noteTranscriptWrite(exec, {
+					kind: args.mode === 'create' ? 'skill-created' : 'skill-updated',
+					summary: `${skillName}：${oneLine(args.description, 160)}`
+				});
 				return Promise.resolve({
 					ok: true,
 					path: written.path,
@@ -1683,7 +1886,11 @@ export function apply(ctx, config) {
 
 	// The background reviewer needs a model route; without an `llm` service it stays off and every
 	// tool above keeps working.
-	if (config.autoReview) ctx.inject(['llm'], (child) => installAutoReview(child, config));
+	if (config.autoReview) {
+		ctx.inject(['llm'], (child) => {
+			collectToolMarker = installAutoReview(child, config, toolMarkers);
+		});
+	}
 
 	// One read-only JSON endpoint for the Web UI panel: the Client cannot read files, so the Host
 	// publishes exactly the numbers and records the panel renders.

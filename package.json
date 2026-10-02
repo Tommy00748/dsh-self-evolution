@@ -1,7 +1,7 @@
 {
   "name": "dsh-self-evolution",
-  "version": "0.8.0",
-  "description": "Self-evolution for DeepSeek Harness: bounded self-managed memory, an automatic per-turn review that writes plain-language notes and refines skills instead of duplicating them, a skill health check, cross-session recall, and a learning card above the composer that only appears when it has something to say.",
+  "version": "0.9.0",
+  "description": "Self-evolution for DeepSeek Harness: bounded self-managed memory, an automatic per-turn review that writes plain-language notes and refines skills instead of duplicating them, a skill health check, cross-session recall, a durable learning row inside the conversation itself, and a card above the composer reserved for changes waiting on your decision.",
   "type": "module",
   "license": "MIT",
   "keywords": [

@@ -23,7 +23,7 @@ const mod = await import('../index.js');
 const { apply, Config } = mod;
 
 assert.equal(mod.name, 'self-evolution');
-assert.deepEqual(mod.inject, ['tools', 'systemPrompt']);
+assert.deepEqual(mod.inject, ['tools', 'systemPrompt', 'agents']);
 
 /**
  * Fake Cordis context: records what a plugin registers, and lets a test drive the injected services
@@ -35,8 +35,17 @@ function harness() {
 	const injected = new Map();
 	const routes = new Map();
 	const sessionHandlers = [];
+	/** Everything the agent answered with: the transcript rows this plugin appends land here. */
+	const appended = [];
+	const agent = {
+		id: 'session-test',
+		status: 'idle',
+		/** The row waits for the session to be idle, so the fake session must have this. */
+		followup: (message) => { appended.push(message); }
+	};
 	const ctx = {
 		tools: { register: (tool) => { tools.set(tool.name, tool); } },
+		agents: { get: (id) => (id === agent.id ? agent : undefined) },
 		systemPrompt: { section: (section) => { sections.set(section.name, section); } },
 		inject: (names, callback) => { for (const name of names) injected.set(name, callback); },
 		effect: (fn) => { fn(); return () => {}; },
@@ -49,6 +58,7 @@ function harness() {
 		sections,
 		injected,
 		routes,
+		appended,
 		/** Install the web routes the plugin registered through `ctx.inject(['webServer'], …)`. */
 		install() {
 			const install = injected.get('webServer');
@@ -127,7 +137,8 @@ function config(patch = {}) {
 const session = {
 	id: 'session-test',
 	header: { cwd },
-	requestHeader: () => ({ config: { provider: 'provider-x', model: 'model-y' } })
+	requestHeader: () => ({ config: { provider: 'provider-x', model: 'model-y' } }),
+	whenIdle: async () => {}
 };
 /** One tool result event: enough for the reviewer to see a step and to have a transcript line. */
 const toolEvent = { type: 'tool/result', data: { message: { role: 'tool', content: [{ type: 'text', text: 'ran a command' }] }, turn: 1, step: 1 } };
@@ -323,6 +334,107 @@ const endEvent = { type: 'turn/end', data: { reason: { kind: 'normal' } } };
 	assert.ok(refused instanceof Error, 'a prompt-injection pattern must be refused');
 	assert.match(refused.message, /blocked pattern/);
 	assert.equal(h.state().memory.count, 0);
+}
+
+// ── 10. a review that learned something leaves a durable row in the conversation ────────────────
+{
+	const store = freshStore();
+	const h = harness();
+	apply(h.ctx, config({ storeDir: store, autoReview: true, reviewMinSteps: 0 }));
+	h.install();
+	h.installReviewer([JSON.stringify({
+		memory: [{ target: 'memory', action: 'add', content: '这台机器的构建命令是 pnpm build。' }],
+		skill: null,
+		reason: '以后不用再试错。'
+	})]);
+	h.emit(session, toolEvent).emit(session, endEvent);
+	await h.until(() => h.state().entries.length === 1, 'the automatic add');
+	await h.until(() => h.appended.length === 1, 'the transcript row');
+
+	const row = h.appended[0];
+	assert.equal(row.role, 'user', 'the row is logged as a user-role context row');
+	assert.equal(row.source.kind, 'self-evolution', 'the row carries this plugin\'s producer kind');
+	assert.equal(row.source.form, 'notice', 'the row must use the form whose collapsed line is the summary');
+	assert.ok(row.source.summary.length > 0 && row.source.summary.length <= 120, 'the collapsed line is bounded');
+	assert.match(row.source.summary, /记住了一条经验：这台机器的构建命令是 pnpm build。/, 'the collapsed line names what was learned');
+	const body = row.content.map((block) => block.text).join('');
+	assert.match(body, /^\[自我进化记录 · 不是用户发来的消息\]/, 'the body leads with the marker a model needs');
+	assert.match(body, /现在长期记忆里一共 1 条/, 'the body states what is now remembered');
+	assert.match(body, /这台机器的构建命令是 pnpm build。/, 'the body lists the remembered entry');
+	assert.match(body, /以后不用再试错。/, 'the body carries the reviewer\'s reason');
+	// The client draws the collapsed line from the source summary and the body from this content, so the
+	// two halves agree without either one re-deriving the other.
+	assert.equal(row.content.length, 1, 'the row carries exactly one content block');
+	assert.equal(row.content[0].type, 'text', 'the row body is plain text the transcript can expand');
+}
+
+// ── 11. a write through the tool leaves the same row, and a quiet turn leaves none ──────────────
+{
+	const store = freshStore();
+	const h = harness();
+	apply(h.ctx, config({ storeDir: store, autoReview: true, reviewMinSteps: 0 }));
+	h.install();
+	// A reviewer that decides nothing this turn: the row can only come from the tool write.
+	h.installReviewer(['{"memory":[],"skill":null,"reason":""}']);
+	const memory = h.tools.get('memory');
+	await memory.execute({ action: 'add', target: 'user', content: '用户要求回答用简体中文。' }, { cwd, agent: { id: 'session-test' } });
+	h.emit(session, toolEvent).emit(session, endEvent);
+	await h.until(() => h.appended.length === 1, 'the row for the tool write');
+	assert.match(h.appended[0].source.summary, /更新了一条对你的了解：用户要求回答用简体中文。/, 'the tool write is named the same way');
+
+	// A second turn that learns nothing: no second row, and no duplicate of the first.
+	const before = h.appended.length;
+	h.emit(session, toolEvent).emit(session, endEvent);
+	await new Promise((resolve) => setTimeout(resolve, 30));
+	assert.equal(h.appended.length, before, 'a turn that learned nothing leaves no row');
+}
+
+// ── 12. one turn never leaves two rows, and the row can be turned off ───────────────────────────
+{
+	const store = freshStore();
+	const h = harness();
+	apply(h.ctx, config({ storeDir: store, autoReview: true, reviewMinSteps: 0 }));
+	h.install();
+	h.installReviewer([JSON.stringify({
+		memory: [{ target: 'memory', action: 'add', content: '一条会被复盘一起记录的记忆。' }],
+		skill: null,
+		reason: '同一轮里工具和复盘都学到了东西。'
+	})]);
+	// The tool writes inside the same turn the reviewer then reports on.
+	await h.tools.get('memory').execute({ action: 'add', target: 'memory', content: '一条会被复盘一起记录的记忆。' }, { cwd, agent: { id: 'session-test' } });
+	h.emit(session, toolEvent).emit(session, endEvent);
+	await h.until(() => h.appended.length > 0, 'the single row');
+	await new Promise((resolve) => setTimeout(resolve, 40));
+	assert.equal(h.appended.length, 1, 'one turn yields exactly one row');
+	assert.equal(
+		h.appended[0].source.summary.split('记住了一条经验').length - 1,
+		1,
+		'the same learning is not repeated inside the row'
+	);
+	// The tool marker and the review's entry describe the same learning and must not be repeated.
+	assert.equal(
+		h.appended[0].source.summary.split('一条会被复盘一起记录的记忆。').length - 1,
+		1,
+		'the same learning is named exactly once in the row'
+	);
+}
+
+// ── 13. transcriptRow: false keeps the record out of the conversation ───────────────────────────
+{
+	const store = freshStore();
+	const h = harness();
+	apply(h.ctx, config({ storeDir: store, autoReview: true, reviewMinSteps: 0, transcriptRow: false }));
+	h.install();
+	h.installReviewer([JSON.stringify({
+		memory: [{ target: 'memory', action: 'add', content: '关掉对话记录时写入的一条。' }],
+		skill: null,
+		reason: '测开关。'
+	})]);
+	h.emit(session, toolEvent).emit(session, endEvent);
+	await h.until(() => h.state().entries.length === 1, 'the automatic add');
+	await new Promise((resolve) => setTimeout(resolve, 40));
+	assert.equal(h.appended.length, 0, 'with the row turned off nothing is appended');
+	assert.equal(h.state().timeline.length > 0, true, 'the learning timeline still records it');
 }
 
 console.log('host.test.mjs: all checks passed');
